@@ -1,68 +1,84 @@
-import subprocess
+import nmap
+import argparse
+import sys
 from datetime import datetime
 
-TARGET = "127.0.0.1" 
-PORTS = "2323,80,443,554,8080" # Telnet, HTTP, HTTPS, RTSP, Alt-HTTP
-OUTPUT_FILE = "iot_audit_results.txt"
+TELNET_PORTS = "23,2323,2324,2023"
+WEB_PORTS = "80,443,8080,8081,81,88"
+RTSP_PORTS = "554,8554,10554"
 
-def run_nmap(command, title):
-    print(f"[*] Executing {title}...")
-    with open(OUTPUT_FILE, "a") as f:
-        f.write(f"\n{'='*80}\n{title}\n{'='*80}\n")
-        
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-            f.write(result.stdout)
-            if result.stderr:
-                f.write(f"\n[STDERR]\n{result.stderr}")
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            f.write("\n[!] Error: Scan timed out.\n")
-            return ""
-        except Exception as e:
-            f.write(f"\n[!] Error: {str(e)}\n")
-            return ""
+def run_audit(target_ip, output_file):
+    nm = nmap.PortScanner()
+    found_ports = {"telnet": [], "web": [], "rtsp": []}
 
-def main():
-    # Setup the report file
-    with open(OUTPUT_FILE, "w") as f:
-        f.write(f"IoT Camera Security Audit\nTarget: {TARGET}\nDate: {datetime.now()}\n\n")
+    print(f"[*] Starting Audit: {target_ip}")
+    print(f"[*] Step 1: Discovering active services...")
 
-    # STEP 1: Intensive Service & Version Discovery
-    print(f"Starting audit on {TARGET}...")
-    run_nmap(
-        ["nmap", "-sV", "-p", PORTS, TARGET], 
-        "STEP 1: Service and Version Discovery"
-    )
+    
+    all_ports = f"{TELNET_PORTS},{WEB_PORTS},{RTSP_PORTS}"
+    nm.scan(target_ip, ports=all_ports, arguments="-sT -T4")
 
-    # STEP 2: Telnet Brute Force (Your original logic)
-    run_nmap(
-        ["nmap", "-p", "2323", "--script", "telnet-brute", TARGET],
-        "STEP 2: Telnet Credential Audit"
-    )
+    if target_ip not in nm.all_hosts():
+        print(f"[-] Error: Target {target_ip} appears to be offline.")
+        return
 
-    # STEP 3: Web UI Vulnerability & Default Credentials
-    # 'http-enum' finds interesting directories, 'http-default-accounts' checks logins
-    run_nmap(
-        ["nmap", "-p", "80,443,8080", "--script", "http-enum,http-default-accounts", TARGET],
-        "STEP 3: Web Interface & Default Credential Audit"
-    )
+    # Categorize 
+    for port in nm[target_ip].all_tcp():
+        state = nm[target_ip]['tcp'][port]['state']
+        if state == 'open':
+            p_str = str(port)
+            if p_str in TELNET_PORTS: found_ports["telnet"].append(p_str)
+            elif p_str in WEB_PORTS: found_ports["web"].append(p_str)
+            elif p_str in RTSP_PORTS: found_ports["rtsp"].append(p_str)
 
-    # STEP 4: RTSP Video Stream Check
-    # Determines if the camera video stream is accessible without a password
-    run_nmap(
-        ["nmap", "-p", "554", "--script", "rtsp-methods,rtsp-url-enumeration", TARGET],
-        "STEP 4: RTSP Video Stream Analysis"
-    )
+    # Step 2:scripts ports
+    print(f"[*] Step 2: Running vulnerability scripts on discovered ports...")
+    
+    with open(output_file, "w") as f:
+        f.write(f"IoT Audit Report: {target_ip}\nGenerated: {datetime.now()}\n")
+        f.write("="*50 + "\n\n")
 
-    # STEP 5: Generic Vulnerability Scan (CVEs)
-    # Using the 'vulners' script (requires internet for nmap to download DB usually)
-    run_nmap(
-        ["nmap", "-sV", "-p", PORTS, "--script", "vulners", TARGET],
-        "STEP 5: Known CVE Vulnerability Scan"
-    )
+        # 1.Telnet
+        if found_ports["telnet"]:
+            ports = ",".join(found_ports["telnet"])
+            print(f"    [!] Auditing Telnet on: {ports}")
+            nm.scan(target_ip, ports=ports, arguments="-sV --script telnet-brute")
+            write_results(f, nm[target_ip], "Telnet")
 
-    print(f"\n[+] Audit Complete. Full report saved to: {OUTPUT_FILE}")
+        # 2.Web
+        if found_ports["web"]:
+            ports = ",".join(found_ports["web"])
+            print(f"    [!] Auditing Web UI on: {ports}")
+            nm.scan(target_ip, ports=ports, arguments="-sV --script http-default-accounts,http-title")
+            write_results(f, nm[target_ip], "Web Interface")
+
+        # 3.RTSP
+        if found_ports["rtsp"]:
+            ports = ",".join(found_ports["rtsp"])
+            print(f"    [!] Auditing RTSP on: {ports}")
+            nm.scan(target_ip, ports=ports, arguments="-sV --script rtsp-url-enumeration")
+            write_results(f, nm[target_ip], "Video Stream")
+
+    print(f"\n[+] Audit Complete. Report saved to: {output_file}")
+
+def write_results(f, host_data, category):
+    f.write(f"--- {category} Analysis ---\n")
+    for port in host_data.all_tcp():
+        port_info = host_data['tcp'][port]
+        f.write(f"Port {port}: {port_info.get('product', 'Unknown')} {port_info.get('version', '')}\n")
+        if 'script' in port_info:
+            for sid, out in port_info['script'].items():
+                f.write(f"  > {sid}:\n{out}\n")
+    f.write("\n")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Automated IoT Service Discovery & Audit")
+    parser.add_argument("target", help="Target IP address")
+    parser.add_argument("-o", "--output", help="Output file", default="audit_results.txt")
+    
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(1)
+        
+    args = parser.parse_args()
+    run_audit(args.target, args.output)

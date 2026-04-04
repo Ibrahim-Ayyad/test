@@ -1,0 +1,12 @@
+import binascii
+
+def hex_text_to_bin(input_text_file, output_bin_file):
+    with open(input_text_file, "r") as f_in, open(output_bin_file, "wb") as f_out:
+        for line in f_in:
+            # Extract just the hex parts (usually after the address colon)
+            if ":" in line:
+                hex_part = line.split(":")[1].strip().replace(" ", "")
+                # Only take the first 16 bytes if there's ASCII noise at the end
+                f_out.write(binascii.unhexlify(hex_part[:32]))
+
+# hex_text_to_bin("camera_serial_dump.bin", "clean_firmware.bin")

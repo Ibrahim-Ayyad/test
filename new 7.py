@@ -1,84 +1,124 @@
+import customtkinter as ctk
 import nmap
-import argparse
-import sys
+import serial
+import yara
+import threading
+import os
 from datetime import datetime
 
-TELNET_PORTS = "23,2323,2324,2023"
-WEB_PORTS = "80,443,8080,8081,81,88"
-RTSP_PORTS = "554,8554,10554"
+# --- SETTINGS & THEME ---
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
-def run_audit(target_ip, output_file):
-    nm = nmap.PortScanner()
-    found_ports = {"telnet": [], "web": [], "rtsp": []}
+class IoTSecuritySuite(ctk.CTk):
+    def __init__(self):
+        super().__init__()
 
-    print(f"[*] Starting Audit: {target_ip}")
-    print(f"[*] Step 1: Discovering active services...")
+        self.title("IoT Sentinel: Tapo C100 Security Suite")
+        self.geometry("900x600")
 
-    
-    all_ports = f"{TELNET_PORTS},{WEB_PORTS},{RTSP_PORTS}"
-    nm.scan(target_ip, ports=all_ports, arguments="-sT -T4")
+        # Layout Grid
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-    if target_ip not in nm.all_hosts():
-        print(f"[-] Error: Target {target_ip} appears to be offline.")
-        return
+        # --- SIDEBAR ---
+        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        
+        self.logo_label = ctk.CTkLabel(self.sidebar, text="IoT SENTINEL", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-    # Categorize 
-    for port in nm[target_ip].all_tcp():
-        state = nm[target_ip]['tcp'][port]['state']
-        if state == 'open':
-            p_str = str(port)
-            if p_str in TELNET_PORTS: found_ports["telnet"].append(p_str)
-            elif p_str in WEB_PORTS: found_ports["web"].append(p_str)
-            elif p_str in RTSP_PORTS: found_ports["rtsp"].append(p_str)
+        self.target_entry = ctk.CTkEntry(self.sidebar, placeholder_text="Target IP (e.g. 192.168.1.5)")
+        self.target_entry.grid(row=1, column=0, padx=20, pady=10)
 
-    # Step 2:scripts ports
-    print(f"[*] Step 2: Running vulnerability scripts on discovered ports...")
-    
-    with open(output_file, "w") as f:
-        f.write(f"IoT Audit Report: {target_ip}\nGenerated: {datetime.now()}\n")
-        f.write("="*50 + "\n\n")
+        self.scan_btn = ctk.CTkButton(self.sidebar, text="Run Dynamic Scan", command=self.start_nmap)
+        self.scan_btn.grid(row=2, column=0, padx=20, pady=10)
 
-        # 1.Telnet
-        if found_ports["telnet"]:
-            ports = ",".join(found_ports["telnet"])
-            print(f"    [!] Auditing Telnet on: {ports}")
-            nm.scan(target_ip, ports=ports, arguments="-sV --script telnet-brute")
-            write_results(f, nm[target_ip], "Telnet")
+        self.serial_btn = ctk.CTkButton(self.sidebar, text="Start Serial Dump", fg_color="transparent", border_width=2, command=self.start_serial)
+        self.serial_btn.grid(row=3, column=0, padx=20, pady=10)
 
-        # 2.Web
-        if found_ports["web"]:
-            ports = ",".join(found_ports["web"])
-            print(f"    [!] Auditing Web UI on: {ports}")
-            nm.scan(target_ip, ports=ports, arguments="-sV --script http-default-accounts,http-title")
-            write_results(f, nm[target_ip], "Web Interface")
+        self.yara_btn = ctk.CTkButton(self.sidebar, text="Analyze Firmware", fg_color="#A155B9", command=self.run_yara)
+        self.yara_btn.grid(row=4, column=0, padx=20, pady=10)
 
-        # 3.RTSP
-        if found_ports["rtsp"]:
-            ports = ",".join(found_ports["rtsp"])
-            print(f"    [!] Auditing RTSP on: {ports}")
-            nm.scan(target_ip, ports=ports, arguments="-sV --script rtsp-url-enumeration")
-            write_results(f, nm[target_ip], "Video Stream")
+        # --- MAIN TERMINAL ---
+        self.textbox = ctk.CTkTextbox(self, font=("Courier New", 12))
+        self.textbox.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
 
-    print(f"\n[+] Audit Complete. Report saved to: {output_file}")
+    def log(self, message):
+        self.textbox.insert("end", f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+        self.textbox.see("end")
 
-def write_results(f, host_data, category):
-    f.write(f"--- {category} Analysis ---\n")
-    for port in host_data.all_tcp():
-        port_info = host_data['tcp'][port]
-        f.write(f"Port {port}: {port_info.get('product', 'Unknown')} {port_info.get('version', '')}\n")
-        if 'script' in port_info:
-            for sid, out in port_info['script'].items():
-                f.write(f"  > {sid}:\n{out}\n")
-    f.write("\n")
+    # --- DYNAMIC SCANNING LOGIC ---
+    def start_nmap(self):
+        target = self.target_entry.get()
+        if not target:
+            self.log("ERROR: Please enter a Target IP.")
+            return
+        
+        self.log(f"Starting Nmap Audit on {target}...")
+        threading.Thread(target=self.nmap_worker, args=(target,), daemon=True).start()
+
+    def nmap_worker(self, target):
+        nm = nmap.PortScanner()
+        # Scanning common Tapo ports: 22, 23, 554, 2020, 80, 443, 8080
+        nm.scan(target, '22,23,554,2020,80,443,8080', arguments='-sV --script rtsp-url-enumeration,http-title')
+        
+        if target in nm.all_hosts():
+            for proto in nm[target].all_protocols():
+                ports = nm[target][proto].keys()
+                for port in ports:
+                    state = nm[target][proto][port]['state']
+                    service = nm[target][proto][port]['product']
+                    self.log(f"FOUND: Port {port}/{proto} is {state} ({service})")
+        else:
+            self.log("Scan Complete: No open ports found.")
+
+    # --- SERIAL DUMP LOGIC ---
+    def start_serial(self):
+        self.log("Opening Serial Port /dev/ttyUSB0...")
+        threading.Thread(target=self.serial_worker, daemon=True).start()
+
+    def serial_worker(self):
+        try:
+            # Adjust COM port for Windows or /dev/tty for Linux
+            with serial.Serial('/dev/ttyUSB0', 115200, timeout=1) as ser:
+                with open("dump_output.bin", "ab") as f:
+                    self.log("Dumping data to dump_output.bin... (Press Stop to end)")
+                    while True:
+                        if ser.in_waiting:
+                            data = ser.read(ser.in_waiting)
+                            f.write(data)
+        except Exception as e:
+            self.log(f"SERIAL ERROR: {e}")
+
+    # --- STATIC ANALYSIS (YARA) LOGIC ---
+    def run_yara(self):
+        if not os.path.exists("dump_output.bin"):
+            self.log("ERROR: No firmware dump found. Run Serial Dump first.")
+            return
+
+        self.log("Compiling YARA rules for Tapo C100...")
+        rules_str = """
+        rule Tapo_Hardcoded_Strings {
+            strings:
+                $s1 = "TP-Link" nocase
+                $s2 = "root:x:0:0"
+                $s3 = "admin123"
+            condition:
+                any of them
+        }
+        """
+        try:
+            rules = yara.compile(source=rules_str)
+            matches = rules.match("dump_output.bin")
+            if matches:
+                for m in matches:
+                    self.log(f"CRITICAL: YARA Match Found -> {m.rule}")
+            else:
+                self.log("YARA: No suspicious signatures found in binary.")
+        except Exception as e:
+            self.log(f"YARA ERROR: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Automated IoT Service Discovery & Audit")
-    parser.add_argument("target", help="Target IP address")
-    parser.add_argument("-o", "--output", help="Output file", default="audit_results.txt")
-    
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(1)
-        
-    args = parser.parse_args()
-    run_audit(args.target, args.output)
+    app = IoTSecuritySuite()
+    app.mainloop()

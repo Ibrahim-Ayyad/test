@@ -1,9 +1,3 @@
-"""
-ForensicSentinel V4
-IoT & Network Forensic Audit Tool
-Author: Rewritten for clarity, modularity, and reliability
-"""
-
 import customtkinter as ctk
 import nmap
 import threading
